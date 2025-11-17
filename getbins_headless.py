@@ -447,6 +447,35 @@ def get_bin_type_column_prefix(collection_type):
     return None
 
 
+def drop_tables(conn):
+    """Drop all tables, views, and functions to allow schema changes."""
+    cursor = conn.cursor()
+    
+    # Drop view first (if it exists)
+    cursor.execute("""
+        DROP VIEW IF EXISTS collections_with_deltas
+    """)
+    
+    # Drop function (if it exists)
+    cursor.execute("""
+        DROP FUNCTION IF EXISTS format_time_delta(INTERVAL)
+    """)
+    
+    # Drop index (if it exists)
+    cursor.execute("""
+        DROP INDEX IF EXISTS idx_collections_site_last_checked
+    """)
+    
+    # Drop the collections table (if it exists)
+    cursor.execute("""
+        DROP TABLE IF EXISTS collections
+    """)
+    
+    conn.commit()
+    cursor.close()
+    print("✓ Dropped existing database tables, views, and functions", flush=True)
+
+
 def create_tables(conn):
     """Create simplified database table with columns for each bin type."""
     cursor = conn.cursor()
@@ -454,7 +483,7 @@ def create_tables(conn):
     # Create collections table with one row per address
     # Each bin type has its own last_collection and next_collection columns
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS collections (
+        CREATE TABLE collections (
             address TEXT PRIMARY KEY,
             black_rubbish_140l_last_collection TIMESTAMP WITH TIME ZONE,
             black_rubbish_140l_next_collection TIMESTAMP WITH TIME ZONE,
@@ -472,11 +501,108 @@ def create_tables(conn):
     
     # Create index for site_last_checked
     cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_collections_site_last_checked ON collections(site_last_checked)
+        CREATE INDEX idx_collections_site_last_checked ON collections(site_last_checked)
+    """)
+    
+    # Create function to format time delta as human-readable string
+    cursor.execute("""
+        CREATE OR REPLACE FUNCTION format_time_delta(delta_interval INTERVAL)
+        RETURNS TEXT AS $$
+        DECLARE
+            total_seconds BIGINT;
+            days INT;
+            hours INT;
+            minutes INT;
+            parts TEXT[];
+        BEGIN
+            -- Handle NULL or negative intervals
+            IF delta_interval IS NULL OR delta_interval < INTERVAL '0' THEN
+                RETURN 'Collection time has passed';
+            END IF;
+            
+            total_seconds := EXTRACT(EPOCH FROM delta_interval)::BIGINT;
+            
+            -- Calculate components
+            days := total_seconds / 86400;
+            hours := (total_seconds % 86400) / 3600;
+            minutes := (total_seconds % 3600) / 60;
+            
+            -- Build parts array
+            IF days > 0 THEN
+                IF days = 1 THEN
+                    parts := array_append(parts, '1 day');
+                ELSE
+                    parts := array_append(parts, days || ' days');
+                END IF;
+            END IF;
+            
+            IF hours > 0 THEN
+                IF hours = 1 THEN
+                    parts := array_append(parts, '1 hour');
+                ELSE
+                    parts := array_append(parts, hours || ' hours');
+                END IF;
+            END IF;
+            
+            IF minutes > 0 THEN
+                IF minutes = 1 THEN
+                    parts := array_append(parts, '1 minute');
+                ELSE
+                    parts := array_append(parts, minutes || ' minutes');
+                END IF;
+            END IF;
+            
+            -- Format result
+            IF array_length(parts, 1) IS NULL THEN
+                RETURN 'Less than 1 minute';
+            ELSIF array_length(parts, 1) = 1 THEN
+                RETURN parts[1];
+            ELSIF array_length(parts, 1) = 2 THEN
+                RETURN parts[1] || ' and ' || parts[2];
+            ELSE
+                RETURN array_to_string(parts[1:array_length(parts, 1)-1], ', ') || ' and ' || parts[array_length(parts, 1)];
+            END IF;
+        END;
+        $$ LANGUAGE plpgsql IMMUTABLE;
+    """)
+    
+    # Create view with computed time delta columns for each bin type
+    cursor.execute("""
+        CREATE OR REPLACE VIEW collections_with_deltas AS
+        SELECT 
+            address,
+            site_last_checked,
+            -- Black Rubbish 140L
+            black_rubbish_140l_last_collection,
+            black_rubbish_140l_next_collection,
+            format_time_delta(NOW() - black_rubbish_140l_last_collection) AS time_since_black_rubbish_140l,
+            format_time_delta(black_rubbish_140l_next_collection - NOW()) AS time_until_black_rubbish_140l,
+            -- Blue Cardboard Bag
+            blue_cardboard_bag_last_collection,
+            blue_cardboard_bag_next_collection,
+            format_time_delta(NOW() - blue_cardboard_bag_last_collection) AS time_since_blue_cardboard_bag,
+            format_time_delta(blue_cardboard_bag_next_collection - NOW()) AS time_until_blue_cardboard_bag,
+            -- Black Food Waste
+            black_food_waste_last_collection,
+            black_food_waste_next_collection,
+            format_time_delta(NOW() - black_food_waste_last_collection) AS time_since_black_food_waste,
+            format_time_delta(black_food_waste_next_collection - NOW()) AS time_until_black_food_waste,
+            -- Green Garden Bin
+            green_garden_bin_last_collection,
+            green_garden_bin_next_collection,
+            format_time_delta(NOW() - green_garden_bin_last_collection) AS time_since_green_garden_bin,
+            format_time_delta(green_garden_bin_next_collection - NOW()) AS time_until_green_garden_bin,
+            -- Green Recycling Box
+            green_recycling_box_last_collection,
+            green_recycling_box_next_collection,
+            format_time_delta(NOW() - green_recycling_box_last_collection) AS time_since_green_recycling_box,
+            format_time_delta(green_recycling_box_next_collection - NOW()) AS time_until_green_recycling_box
+        FROM collections;
     """)
     
     conn.commit()
     cursor.close()
+    print("✓ Created database tables, function, and view", flush=True)
 
 
 
@@ -525,12 +651,11 @@ def store_collections(conn, address, postcode, collections_data):
         update_fields[f"{column_prefix}_last_collection"] = last_collection_dt
         update_fields[f"{column_prefix}_next_collection"] = next_collection_dt
     
-    # Build SQL for INSERT ... ON CONFLICT UPDATE
+    # Build SQL for INSERT (table is wiped each run, so no conflicts)
     # Start with address and site_last_checked
     columns = ["address", "site_last_checked"]
     values = [address, site_last_checked]
     placeholders = ["%s", "%s"]
-    update_parts = ["site_last_checked = EXCLUDED.site_last_checked"]
     
     # Add all bin type columns
     for column_prefix in ["black_rubbish_140l", "blue_cardboard_bag", "black_food_waste", 
@@ -547,16 +672,11 @@ def store_collections(conn, address, postcode, collections_data):
         
         placeholders.append("%s")
         placeholders.append("%s")
-        
-        update_parts.append(f"{last_col} = EXCLUDED.{last_col}")
-        update_parts.append(f"{next_col} = EXCLUDED.{next_col}")
     
     # Build and execute SQL
     sql = f"""
         INSERT INTO collections ({', '.join(columns)})
         VALUES ({', '.join(placeholders)})
-        ON CONFLICT (address) DO UPDATE SET
-            {', '.join(update_parts)}
     """
     
     cursor.execute(sql, values)
@@ -741,9 +861,11 @@ def main():
             print("Connecting to database...", flush=True)
             db_conn = psycopg2.connect(**DB_CONFIG)
             try:
-                # Create tables if they don't exist
+                # Wipe existing tables and recreate schema
+                print("Wiping and recreating database schema...", flush=True)
+                drop_tables(db_conn)
                 create_tables(db_conn)
-                print("✓ Database tables ready", flush=True)
+                print("✓ Database schema ready", flush=True)
                 
                 # Store collections in database
                 store_collections(db_conn, ADDRESS_TEXT, POSTCODE, collections)
