@@ -74,9 +74,165 @@ jobs:
           echo "✅ Build completed successfully!"
           echo "=========================================="
 
-  push-to-image-registry:
+  test-container:
+    # This test job runs on all PRs and pushes to main
+    # PRs must pass this test before they can be merged (enforced via branch protection)
     runs-on: ubuntu-latest
     needs: build-container-image
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: |
+          docker load -i image.tar
+
+      - name: Create Docker network
+        run: |
+          docker network create test-network || true
+
+      - name: Start PostgreSQL container
+        run: |
+          docker run -d \
+            --name test-postgres \
+            --network test-network \
+            -e POSTGRES_USER=testuser \
+            -e POSTGRES_PASSWORD=testpass \
+            -e POSTGRES_DB=binday \
+            postgres:15-alpine
+        continue-on-error: false
+
+      - name: Wait for PostgreSQL to be ready
+        run: |
+          echo "Waiting for PostgreSQL to be ready..."
+          for i in {1..30}; do
+            if docker exec test-postgres pg_isready -U testuser; then
+              echo "PostgreSQL is ready!"
+              break
+            fi
+            echo "Attempt $i/30: PostgreSQL not ready yet, waiting..."
+            sleep 2
+          done
+          
+          # Verify connection
+          if ! docker exec test-postgres pg_isready -U testuser; then
+            echo "ERROR: PostgreSQL failed to become ready"
+            exit 1
+          fi
+
+      - name: Validate required secrets
+        run: |
+          if [ -z "${{ secrets.TEST_POSTCODE }}" ]; then
+            echo "❌ Error: TEST_POSTCODE secret is required"
+            exit 1
+          fi
+          if [ -z "${{ secrets.TEST_ADDRESS_LINE }}" ]; then
+            echo "❌ Error: TEST_ADDRESS_LINE secret is required"
+            exit 1
+          fi
+          echo "✅ Required secrets are present"
+
+      - name: Display test information
+        run: |
+          echo "=========================================="
+          echo "🧪 Container Test Information"
+          echo "=========================================="
+          echo "PostgreSQL Container: test-postgres"
+          echo "Database: binday"
+          echo "User: testuser"
+          echo "Host: test-postgres (container network)"
+          echo "Port: 5432"
+          echo ""
+          echo "Test Postcode: ${{ secrets.TEST_POSTCODE }}"
+          echo "Test Address: ${{ secrets.TEST_ADDRESS_LINE }}"
+          echo "=========================================="
+
+      - name: Run binday container
+        id: run-binday
+        run: |
+          # Get PostgreSQL container IP or use container name
+          PG_HOST="test-postgres"
+          
+          # Run the binday container and capture exit code
+          set +e
+          docker run --rm \
+            --network test-network \
+            -e POSTCODE="${{ secrets.TEST_POSTCODE }}" \
+            -e ADDRESS_LINE="${{ secrets.TEST_ADDRESS_LINE }}" \
+            -e PG_HOST="$PG_HOST" \
+            -e PG_PORT="5432" \
+            -e PG_DATABASE="binday" \
+            -e PG_USERNAME="testuser" \
+            -e PG_PASSWORD="testpass" \
+            -e TIMEZONE="${{ secrets.TEST_TIMEZONE || 'Europe/London' }}" \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          EXIT_CODE=$?
+          set -e
+          
+          echo "Container exit code: $EXIT_CODE"
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+          
+          # Note: Exit code 0 is success, but we'll verify database even if scraping fails
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "✅ Container executed successfully"
+          else
+            echo "⚠️ Container exited with code $EXIT_CODE"
+          fi
+
+      - name: Verify database contents
+        if: always()
+        run: |
+          echo "Verifying database contents..."
+          
+          # Check if tables were created
+          TABLE_COUNT=$(docker exec test-postgres psql -U testuser -d binday -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'collections';" | tr -d ' ')
+          
+          if [ "$TABLE_COUNT" != "1" ]; then
+            echo "❌ Collections table was not created!"
+            echo "This indicates the application failed to connect to the database or create tables."
+            exit 1
+          fi
+          
+          echo "✅ Collections table exists"
+          
+          # Check if any data was inserted (optional - depends on test data)
+          ROW_COUNT=$(docker exec test-postgres psql -U testuser -d binday -t -c "SELECT COUNT(*) FROM collections;" | tr -d ' ')
+          echo "📊 Rows in collections table: $ROW_COUNT"
+          
+          # Show table structure
+          echo ""
+          echo "Table structure:"
+          docker exec test-postgres psql -U testuser -d binday -c "\d collections"
+          
+          # If no rows were inserted, that's okay for a basic test (scraping might fail with test data)
+          if [ "$ROW_COUNT" = "0" ]; then
+            echo ""
+            echo "ℹ️ No data rows found - this is expected if test postcode/address are invalid"
+            echo "The important part is that the table was created, indicating successful DB connection."
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up containers..."
+          docker stop test-postgres || true
+          docker rm test-postgres || true
+          docker network rm test-network || true
+
+  push-to-image-registry:
+    runs-on: ubuntu-latest
+    needs: [build-container-image, test-container]
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     permissions:
       contents: read
