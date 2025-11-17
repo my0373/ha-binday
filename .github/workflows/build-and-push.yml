@@ -34,7 +34,30 @@ jobs:
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_PASSWORD }}
 
+      - name: Display push information
+        run: |
+          echo "=========================================="
+          echo "🚀 Container Push Information"
+          echo "=========================================="
+          echo "Registry: ${{ env.REGISTRY }}"
+          echo "Image Name: ${{ env.IMAGE_NAME }}"
+          echo "Full Image Tag: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          WILL_PUSH="${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') }}"
+          echo "Will Push: $WILL_PUSH"
+          echo "=========================================="
+          if [ "$WILL_PUSH" = "true" ]; then
+            echo ""
+            echo "📤 PUSH ENABLED - Image will be pushed to Quay.io"
+            echo "   Destination: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            echo ""
+          else
+            echo ""
+            echo "🚫 PUSH DISABLED - Image will only be built (not pushed)"
+            echo ""
+          fi
+
       - name: Build and push Docker image
+        id: build-push
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -43,4 +66,28 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          outputs: metadata=true
+
+      - name: Verify push to Quay.io
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+        run: |
+          echo "=========================================="
+          echo "✅ Container Push Verification"
+          echo "=========================================="
+          echo ""
+          echo "📦 Image Details:"
+          echo "  Registry: ${{ env.REGISTRY }}"
+          echo "  Repository: ${{ secrets.QUAY_USERNAME }}/ha-binday"
+          echo "  Tag: latest"
+          echo "  Full Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          echo ""
+          if [ -n "${{ steps.build-push.outputs.digest }}" ]; then
+            echo "  Digest: ${{ steps.build-push.outputs.digest }}"
+          fi
+          echo ""
+          echo "🔗 View image on Quay.io:"
+          echo "  https://quay.io/repository/${{ secrets.QUAY_USERNAME }}/ha-binday"
+          echo ""
+          echo "✅ Push completed successfully!"
+          echo "=========================================="
 
