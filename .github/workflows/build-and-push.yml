@@ -14,7 +14,7 @@ env:
   IMAGE_NAME: ${{ secrets.QUAY_USERNAME }}/ha-binday
 
 jobs:
-  build-and-push:
+  build-container-image:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -26,6 +26,86 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Display build information
+        run: |
+          echo "=========================================="
+          echo "🔨 Container Build Information"
+          echo "=========================================="
+          echo "Registry: ${{ env.REGISTRY }}"
+          echo "Image Name: ${{ env.IMAGE_NAME }}"
+          echo "Full Image Tag: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          echo "=========================================="
+          echo ""
+          echo "🔨 Building container image..."
+          echo ""
+
+      - name: Build Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: metadata=true
+
+      - name: Save Docker image
+        run: |
+          docker save ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest -o image.tar
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: image.tar
+          retention-days: 1
+
+      - name: Display build completion
+        run: |
+          echo "=========================================="
+          echo "✅ Container Build Complete"
+          echo "=========================================="
+          echo ""
+          echo "📦 Image Details:"
+          echo "  Registry: ${{ env.REGISTRY }}"
+          echo "  Repository: ${{ secrets.QUAY_USERNAME }}/ha-binday"
+          echo "  Tag: latest"
+          echo "  Full Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          echo ""
+          if [ -n "${{ steps.build.outputs.digest }}" ]; then
+            echo "  Digest: ${{ steps.build.outputs.digest }}"
+          fi
+          echo ""
+          echo "✅ Build completed successfully!"
+          echo "=========================================="
+
+  push-to-image-registry:
+    runs-on: ubuntu-latest
+    needs: build-container-image
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: |
+          docker load -i image.tar
 
       - name: Log in to Quay.io
         uses: docker/login-action@v3
@@ -42,34 +122,20 @@ jobs:
           echo "Registry: ${{ env.REGISTRY }}"
           echo "Image Name: ${{ env.IMAGE_NAME }}"
           echo "Full Image Tag: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
-          WILL_PUSH="${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') }}"
-          echo "Will Push: $WILL_PUSH"
           echo "=========================================="
-          if [ "$WILL_PUSH" = "true" ]; then
-            echo ""
-            echo "📤 PUSH ENABLED - Image will be pushed to Quay.io"
-            echo "   Destination: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
-            echo ""
-          else
-            echo ""
-            echo "🚫 PUSH DISABLED - Image will only be built (not pushed)"
-            echo ""
-          fi
+          echo ""
+          echo "📤 Pushing image to Quay.io..."
+          echo "   Destination: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          echo ""
 
-      - name: Build and push Docker image
-        id: build-push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') }}
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          outputs: metadata=true
+      - name: Push Docker image
+        id: push
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          DIGEST=$(docker inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest --format='{{index .RepoDigests 0}}' | cut -d'@' -f2)
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
 
       - name: Verify push to Quay.io
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
         run: |
           echo "=========================================="
           echo "✅ Container Push Verification"
@@ -81,8 +147,8 @@ jobs:
           echo "  Tag: latest"
           echo "  Full Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
           echo ""
-          if [ -n "${{ steps.build-push.outputs.digest }}" ]; then
-            echo "  Digest: ${{ steps.build-push.outputs.digest }}"
+          if [ -n "${{ steps.push.outputs.digest }}" ]; then
+            echo "  Digest: ${{ steps.push.outputs.digest }}"
           fi
           echo ""
           echo "🔗 View image on Quay.io:"
