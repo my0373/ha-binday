@@ -11,7 +11,7 @@ on:
 
 env:
   REGISTRY: quay.io
-  IMAGE_NAME: my0373/ha-binday
+  IMAGE_NAME: ${{ secrets.QUAY_USERNAME }}/ha-binday
 
 jobs:
   build-and-push:
