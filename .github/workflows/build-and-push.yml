@@ -47,15 +47,10 @@ jobs:
           context: .
           file: ./Dockerfile
           push: false
-          load: true
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          outputs: metadata=true
-
-      - name: Save Docker image
-        run: |
-          docker save ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest -o image.tar
+          outputs: type=docker,dest=image.tar
 
       - name: Upload Docker image artifact
         uses: actions/upload-artifact@v4
@@ -75,10 +70,6 @@ jobs:
           echo "  Repository: ${{ secrets.QUAY_USERNAME }}/ha-binday"
           echo "  Tag: latest"
           echo "  Full Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
-          echo ""
-          if [ -n "${{ steps.build.outputs.digest }}" ]; then
-            echo "  Digest: ${{ steps.build.outputs.digest }}"
-          fi
           echo ""
           echo "✅ Build completed successfully!"
           echo "=========================================="
